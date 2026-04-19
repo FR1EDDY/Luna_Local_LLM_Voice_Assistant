@@ -1,6 +1,13 @@
 .env
+.claude/
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.venv/
+venv/
 models/
-*.wav
 .DS_Store
+
+# Optional large / personal WAVs at repo root (see jarvis/config.py defaults)
+/Vocals Audio.wav
+/Kokoro TTS Audio.wav
