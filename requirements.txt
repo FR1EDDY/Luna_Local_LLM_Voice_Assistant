@@ -1,0 +1,10 @@
+# Target: Python 3.12 (see .python-version). Kokoro is omitted on 3.13+ until upstream supports it.
+numpy>=1.24
+sounddevice>=0.4.6
+openai>=1.30.0
+pyobjc-framework-EventKit>=10.2
+pyobjc-framework-Quartz>=10.2
+kokoro>=0.9.4; python_version < "3.13"
+soundfile>=0.12.1
+vosk>=0.3.44
+pywebview>=5.0.0

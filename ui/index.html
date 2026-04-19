@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Luna</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div id="luna-app">
+        <!-- Title bar for dragging -->
+        <div id="titlebar" class="pywebview-drag-region">
+            <div class="window-controls">
+                <div class="dot close"></div>
+                <div class="dot min"></div>
+                <div class="dot max"></div>
+            </div>
+        </div>
+
+        <!-- Main Visualizer Area -->
+        <div id="central-view">
+            <div id="visualizer-container" class="idle">
+                <div class="ring ring-outer"></div>
+                <div class="ring ring-middle"></div>
+                <div class="ring ring-inner"></div>
+            </div>
+
+            <div id="status-text">
+                <h2>Luna is sleeping...</h2>
+                <p>Click the mic to wake</p>
+            </div>
+
+            <div id="transcript-panel">
+                <div id="transcript-history"></div>
+                <div id="transcript-current">
+                    <div id="transcript-user-current"></div>
+                    <div id="transcript-luna-current"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Text Chat Input -->
+        <div id="chat-input-area">
+            <input type="text" id="chat-input" placeholder="Type a message to Luna..." autocomplete="off"
+                spellcheck="false" />
+            <button id="btn-send" title="Send">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    stroke-linejoin="round">
+                    <line x1="22" y1="2" x2="11" y2="13"></line>
+                    <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                </svg>
+            </button>
+        </div>
+
+        <div id="voice-volume-row" title="Luna TTS output level">
+            <div class="glass-slider-container">
+                <input type="range" id="luna-voice-volume" min="0" max="100" step="1" value="80" aria-label="Luna voice volume percent" style="--val: 80%;" />
+                <div class="glass-slider-overlay">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="vol-icon">
+                        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                        <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+                    </svg>
+                    <span id="luna-voice-volume-pct">80</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Bottom Toolbar -->
+        <div id="toolbar">
+            <button id="btn-mic" class="toolbar-btn" title="Toggle Listening">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    stroke-linejoin="round">
+                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                    <line x1="12" y1="19" x2="12" y2="22"></line>
+                </svg>
+            </button>
+            <button id="btn-stop" class="toolbar-btn" title="Stop">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    stroke-linejoin="round">
+                    <rect x="6" y="6" width="12" height="12" rx="2" ry="2"></rect>
+                </svg>
+            </button>
+            <button id="btn-plans" class="toolbar-btn" title="Plans">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    stroke-linejoin="round">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                    <polyline points="14 2 14 8 20 8"></polyline>
+                    <line x1="16" y1="13" x2="8" y2="13"></line>
+                    <line x1="16" y1="17" x2="8" y2="17"></line>
+                    <polyline points="10 9 9 9 8 9"></polyline>
+                </svg>
+            </button>
+        </div>
+
+        <!-- Plans Panel Overlay -->
+        <div id="plans-panel" class="hidden">
+            <div id="plans-header" class="pywebview-drag-region">
+                <button id="btn-back-plans" class="hidden">← Back</button>
+                <span id="plans-title">Plans</span>
+                <button id="btn-close-plans">✕</button>
+            </div>
+            <div id="plans-list-view">
+                <div id="plans-list"></div>
+                <p id="plans-empty" class="hidden">No plans yet. Say "create a plan for..." to get started.</p>
+            </div>
+            <div id="plan-editor-view" class="hidden">
+                <div id="plan-tab-bar">
+                    <button class="plan-tab active" data-tab="preview">Preview</button>
+                    <button class="plan-tab" data-tab="edit">Edit</button>
+                    <button id="btn-save-plan">Save</button>
+                </div>
+                <div id="plan-tab-preview" class="plan-tab-content">
+                    <div id="plan-preview"></div>
+                </div>
+                <div id="plan-tab-edit" class="plan-tab-content hidden">
+                    <textarea id="plan-editor-textarea" spellcheck="false"></textarea>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Top edge: thin invisible strip; drag to grow/shrink upward (bottom anchored). -->
+    <div id="resize-grip-top" title="Drag to resize height (anchored to bottom)"></div>
+
+    <!-- Manual height resize handle (drag to resize, width stays fixed). -->
+    <div id="resize-grip" title="Drag to resize height">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+            <line x1="11" y1="14" x2="14" y2="11"></line>
+            <line x1="6" y1="14" x2="14" y2="6"></line>
+        </svg>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+
+</html>
