@@ -91,6 +91,7 @@ def ollama_generate_stream(
     system: str | None = None,
     temperature: float = 0.4,
     timeout_s: float = 30.0,
+    max_sentences: int | None = None,
 ) -> Iterator[str]:
     """Stream from Ollama (stream=True), yielding complete sentences as they arrive."""
     host = (host or "").strip().rstrip("/")
@@ -118,6 +119,8 @@ def ollama_generate_stream(
     )
 
     buffer = ""
+    yielded = 0
+    max_s = None if max_sentences is None else max(1, int(max_sentences))
     with urlopen(req, timeout=float(timeout_s)) as resp:
         for raw_line in resp:
             line = raw_line.decode("utf-8").strip()
@@ -133,10 +136,14 @@ def ollama_generate_stream(
                 if not sentence:
                     break
                 yield sentence
+                yielded += 1
+                if max_s is not None and yielded >= max_s:
+                    return
             if data.get("done"):
                 break
     if buffer.strip():
-        yield buffer.strip()
+        if max_s is None or yielded < max_s:
+            yield buffer.strip()
 
 
 def extract_spoken_clock_from_source_briefing(source: str) -> str | None:

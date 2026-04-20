@@ -36,6 +36,12 @@ _EXPLICIT_WEB_SEARCH_RE = re.compile(
     re.IGNORECASE,
 )
 
+_ELABORATE_RE = re.compile(
+    r"^\s*(?:yes|yeah|yep|sure|ok|okay)?\s*(?:please\s+)?"
+    r"(?:elaborate|expand|go\s+deeper|more\s+detail|more\s+details|in\s+detail|detailed|full\s+explanation)\s*$",
+    re.IGNORECASE,
+)
+
 _PLAN_RE = re.compile(
     r"\b(?:create|make|write|generate|build|draft)\s+(?:a\s+)?(?:detailed\s+)?(?:plan|roadmap|outline|checklist|guide|blueprint)\s+(?:for|to|about|on|called|named)\s+(.+)",
     re.IGNORECASE,
@@ -206,6 +212,8 @@ class LunaVoiceFollowup:
         self._pending_plan_overwrite: str | None = None
         self._text_session: bool = False
         self._news_context: list[str] = []
+        self._last_user_question: str | None = None
+        self._last_search_ctx: str | None = None
         self._voice_rms_thr = (
             float(voice_rms_threshold)
             if voice_rms_threshold is not None
@@ -636,6 +644,51 @@ class LunaVoiceFollowup:
             return None
         return q
 
+    @staticmethod
+    def _is_ambiguous_user_text(text: str) -> bool:
+        t = (text or "").strip()
+        if not t:
+            return True
+        # Very short fragments are often STT misses (especially right after wake).
+        words = [w for w in re.split(r"\s+", t) if w]
+        if len(words) <= 1 and len(t) <= 12:
+            return True
+        # Common “garbage” fragments that indicate uncertainty.
+        if t.lower() in {"um", "uh", "huh", "what", "hello", "hey"}:
+            return True
+        return False
+
+    def _maybe_handle_elaboration(self, user_text: str, my_gen: int) -> bool:
+        """
+        If the user asks for more detail, re-ask the last question in detailed mode.
+        Returns True if handled.
+        """
+        if not _ELABORATE_RE.match((user_text or "").strip()):
+            return False
+        q = (self._last_user_question or "").strip()
+        if not q:
+            self._speak("Sure. What should I elaborate on?")
+            self._begin_followup_listening()
+            return True
+        prompt = self._build_prompt(q, search_context=self._last_search_ctx, verbosity="detailed")
+        system = self._chat_system(verbosity="detailed")
+        reply = self._stream_and_speak(prompt, system, my_gen, max_sentences=None)
+        if my_gen != self._session_generation:
+            return True
+        if reply:
+            with self._lock:
+                if my_gen == self._session_generation:
+                    self._history.append((q, reply))
+                    self._trim_history()
+                    self._completed_turns += 1
+            if self._ui_text_callback:
+                try:
+                    self._ui_text_callback(q, reply)
+                except Exception:
+                    pass
+        self._begin_followup_listening()
+        return True
+
     def _search_ddg(self, query: str) -> str | None:
         """
         Web search pipeline:
@@ -782,9 +835,16 @@ class LunaVoiceFollowup:
         if len(self._history) >= max_turns:
             self._history = self._history[-max_turns:]
 
-    def _build_prompt(self, user_text: str, *, search_context: str | None = None) -> str:
+    def _build_prompt(
+        self,
+        user_text: str,
+        *,
+        search_context: str | None = None,
+        verbosity: str = "brief",
+    ) -> str:
         footer = (
             "Reply as Luna in clear spoken English (no markdown). "
+            f"Verbosity: {verbosity.upper()}. "
             "Use QUICK vs DEEP length per your system instructions."
         )
         lines: list[str] = []
@@ -832,8 +892,12 @@ class LunaVoiceFollowup:
             return 0.95
         return 1.0
 
-    def _chat_system(self) -> str:
+    def _chat_system(self, *, verbosity: str = "brief") -> str:
         base = config.LUNA_CHAT_SYSTEM.strip()
+        if verbosity == "brief":
+            base = f"{base}\n\nYou are in BRIEF mode. Keep answers short unless user asks for more detail."
+        elif verbosity == "detailed":
+            base = f"{base}\n\nYou are in DETAILED mode. Give the complete thorough answer."
         if self._completed_turns >= int(config.LUNA_CHAT_OFFER_END_AFTER_TURNS):
             return f"{base}\n\n{config.LUNA_CHAT_SYSTEM_LONG_DIALOGUE.strip()}"
         return base
@@ -853,7 +917,14 @@ class LunaVoiceFollowup:
             return
         mac_audio.play_vocals_wav(p)
 
-    def _stream_and_speak(self, prompt: str, system: str, my_gen: int) -> str:
+    def _stream_and_speak(
+        self,
+        prompt: str,
+        system: str,
+        my_gen: int,
+        *,
+        max_sentences: int | None = None,
+    ) -> str:
         """
         Stream tokens from Ollama into a background thread, collecting the full reply.
         Once all text is received, speak it in a SINGLE Kokoro call — one WAV, one afplay,
@@ -874,6 +945,7 @@ class LunaVoiceFollowup:
                     prompt=prompt,
                     temperature=float(config.LUNA_CHAT_TEMPERATURE),
                     timeout_s=float(config.LUNA_CHAT_TIMEOUT_S),
+                    max_sentences=max_sentences,
                 ):
                     if stop_event.is_set():
                         break
@@ -889,6 +961,8 @@ class LunaVoiceFollowup:
         parts: list[str] = []
         got_first = False
         halfway_s = float(config.LUNA_CHAT_TIMEOUT_S) / 2
+        t0 = time.perf_counter()
+        t_first: float | None = None
 
         while True:
             wait = halfway_s if not got_first else None
@@ -908,6 +982,8 @@ class LunaVoiceFollowup:
             if not got_first:
                 self._set_ui_state("speaking")
             got_first = True
+            if t_first is None:
+                t_first = time.perf_counter()
             parts.append(sentence)
             if self._ui_token_callback and my_gen == self._session_generation:
                 try:
@@ -920,6 +996,14 @@ class LunaVoiceFollowup:
             raise errors[0]
 
         reply = " ".join(parts)
+        if my_gen == self._session_generation:
+            dt_first = None if t_first is None else max(0.0, t_first - t0)
+            dt_total = max(0.0, time.perf_counter() - t0)
+            print(
+                f"[Luna] Ollama: sentences={len(parts)} first_s={dt_first!s} total_s={dt_total:.2f} "
+                f"chars={len(reply)}",
+                flush=True,
+            )
         if reply and my_gen == self._session_generation:
             speed = self._tts_speed_for(reply)
             self._speak(reply, speed=speed)
@@ -980,6 +1064,10 @@ class LunaVoiceFollowup:
                 if history_snapshot:
                     self._save_long_term_memory(history_snapshot)
                 self._invoke_idle_reset()
+                return
+
+            # Progressive disclosure: user asked for more detail on the last question.
+            if self._maybe_handle_elaboration(user_text, my_gen):
                 return
 
             # Plan overwrite confirmation: user said yes/overwrite or new version.
@@ -1195,9 +1283,17 @@ class LunaVoiceFollowup:
             if search_ctx:
                 print(f"[Luna] Web search result injected: {search_ctx[:80]}…", flush=True)
 
-            prompt = self._build_prompt(user_text, search_context=search_ctx)
-            system = self._chat_system()
-            reply = self._stream_and_speak(prompt, system, my_gen)
+            if self._is_ambiguous_user_text(user_text):
+                self._speak("I didn’t catch that clearly. Could you say it again, or add one detail?")
+                self._begin_followup_listening()
+                return
+
+            # Default: brief mode (cap to ~2 sentences). Detailed only when asked.
+            self._last_user_question = user_text
+            self._last_search_ctx = search_ctx
+            prompt = self._build_prompt(user_text, search_context=search_ctx, verbosity="brief")
+            system = self._chat_system(verbosity="brief")
+            reply = self._stream_and_speak(prompt, system, my_gen, max_sentences=2)
             if my_gen != self._session_generation:
                 return
             if reply:
