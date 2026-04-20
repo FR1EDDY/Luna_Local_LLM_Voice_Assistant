@@ -20,6 +20,8 @@ _lock = threading.Lock()
 _live_gain: float = 1.0
 _stop_evt: Optional[threading.Event] = None
 _was_interrupted: bool = False
+# Only one Kokoro→sounddevice playback at a time (prevents overlapping OutputStreams after barge-in/stop).
+_playback_guard = threading.Lock()
 
 
 def set_live_gain(gain: float) -> float:
@@ -68,6 +70,7 @@ def play_wave_blocking_with_live_gain(
     clean finish, False if interrupted or sounddevice was unavailable. The caller can
     fall back to ``afplay`` when False is returned.
     """
+    global _stop_evt, _was_interrupted
     try:
         import sounddevice as sd
     except Exception:
@@ -77,50 +80,55 @@ def play_wave_blocking_with_live_gain(
         return True
 
     audio = np.asarray(wave, dtype=np.float32).reshape(-1)
-    n = int(audio.shape[0])
     pos = 0
     stop_evt = threading.Event()
     finish_evt = threading.Event()
 
-    with _lock:
-        global _stop_evt, _was_interrupted
-        _stop_evt = stop_evt
-        _was_interrupted = False
-
-    def callback(outdata, frames, _time_info, status):  # type: ignore[no-untyped-def]
-        nonlocal pos
-        if stop_evt.is_set():
-            outdata.fill(0.0)
-            raise sd.CallbackStop
-        end = pos + frames
-        chunk = audio[pos:end]
-        pos = end
-        # Apply current live gain, then hard-clip to [-1, 1] (matches ffmpeg behavior).
-        gain = get_live_gain()
-        if chunk.shape[0] < frames:
-            buf = np.zeros(frames, dtype=np.float32)
-            if chunk.shape[0] > 0:
-                buf[: chunk.shape[0]] = chunk
-            outdata[:, 0] = np.clip(buf * gain, -1.0, 1.0)
-            finish_evt.set()
-            raise sd.CallbackStop
-        outdata[:, 0] = np.clip(chunk * gain, -1.0, 1.0)
-
-    try:
-        with sd.OutputStream(
-            samplerate=int(sample_rate),
-            channels=1,
-            dtype="float32",
-            blocksize=blocksize,
-            callback=callback,
-        ):
-            # Wait for natural end OR explicit stop.
-            while not finish_evt.is_set() and not stop_evt.is_set():
-                finish_evt.wait(timeout=0.05)
-    except Exception:
-        return False
-    finally:
+    # Serialize: overlapping OutputStreams on the default device led to silence after stop/barge-in.
+    with _playback_guard:
         with _lock:
-            _stop_evt = None
+            _stop_evt = stop_evt
+            _was_interrupted = False
 
-    return not stop_evt.is_set()
+        def callback(outdata, frames, _time_info, status):  # type: ignore[no-untyped-def]
+            nonlocal pos
+            if stop_evt.is_set():
+                outdata.fill(0.0)
+                raise sd.CallbackStop
+            end = pos + frames
+            chunk = audio[pos:end]
+            pos = end
+            # Apply current live gain, then hard-clip to [-1, 1] (matches ffmpeg behavior).
+            gain = get_live_gain()
+            if chunk.shape[0] < frames:
+                buf = np.zeros(frames, dtype=np.float32)
+                if chunk.shape[0] > 0:
+                    buf[: chunk.shape[0]] = chunk
+                outdata[:, 0] = np.clip(buf * gain, -1.0, 1.0)
+                finish_evt.set()
+                raise sd.CallbackStop
+            outdata[:, 0] = np.clip(chunk * gain, -1.0, 1.0)
+
+        ok_finish = False
+        try:
+            with sd.OutputStream(
+                samplerate=int(sample_rate),
+                channels=1,
+                dtype="float32",
+                blocksize=blocksize,
+                callback=callback,
+            ):
+                # Wait for natural end OR explicit stop.
+                while not finish_evt.is_set() and not stop_evt.is_set():
+                    finish_evt.wait(timeout=0.05)
+            ok_finish = True
+        except Exception:
+            ok_finish = False
+        finally:
+            with _lock:
+                # Only clear if we still own the slot (avoid a late finally from session A
+                # wiping session B's stop_evt registration).
+                if _stop_evt is stop_evt:
+                    _stop_evt = None
+
+        return ok_finish and not stop_evt.is_set()

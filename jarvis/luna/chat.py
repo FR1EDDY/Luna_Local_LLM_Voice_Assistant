@@ -334,6 +334,7 @@ class LunaVoiceFollowup:
             self._phase = "gap"
             self._gap_until = now + float(config.LUNA_POST_WAKE_GAP_S)
         self._set_ui_state("waking")
+        self._sync_live_output_gain()
         threading.Thread(target=self._safe_greeting, daemon=True).start()
 
     def barge_in_luna(self, now: float) -> None:
@@ -353,12 +354,14 @@ class LunaVoiceFollowup:
             self._phase = "gap"
             self._gap_until = now + float(config.LUNA_POST_WAKE_GAP_S)
         mac_audio.stop_spoken_output_macos()
+        self._sync_live_output_gain()
         self._set_ui_state("waking")
         threading.Thread(target=self._safe_greeting, daemon=True).start()
 
     def force_stop(self) -> None:
         """Immediately kill TTS playback and return to idle — used by the UI stop button."""
         mac_audio.stop_spoken_output_macos()
+        self._sync_live_output_gain()
         with self._lock:
             self._session_generation += 1
             self._chunks = []
@@ -369,6 +372,15 @@ class LunaVoiceFollowup:
             self._phase = "idle"
         self._set_ui_state("idle")
         self._invoke_idle_reset()
+
+    def _sync_live_output_gain(self) -> None:
+        """Re-apply UI/output volume to the shared live-gain path (fixes silence after barge-in/stop)."""
+        try:
+            from jarvis.services.live_audio import set_live_gain
+
+            set_live_gain(float(self._vol))
+        except Exception:
+            pass
 
     def process_text_input(self, text: str) -> None:
         """Process a message typed in the UI text chat (no STT, same command/LLM pipeline)."""
