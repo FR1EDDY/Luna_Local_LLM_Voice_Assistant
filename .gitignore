@@ -11,3 +11,7 @@ models/
 # Optional large / personal WAVs at repo root (see jarvis/config.py defaults)
 /Vocals Audio.wav
 /Kokoro TTS Audio.wav
+
+# Local notes / generated plans (avoid pushing personal content)
+plans/
+AUDIT.md
