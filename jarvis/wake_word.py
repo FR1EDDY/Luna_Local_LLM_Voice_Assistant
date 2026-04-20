@@ -22,18 +22,55 @@ def wake_word_pattern(phrase: str) -> re.Pattern[str]:
     return re.compile(rf"\b{esc}\b", re.IGNORECASE)
 
 
-# Pattern for explicit stop/restart intent while session is active.
-# Only these phrases trigger barge-in; bare "luna" is ignored while speaking.
-_BARGE_IN_STOP_RE = re.compile(
-    r"\b(luna\s+(stop|restart|cancel|quit|enough)|stop\s+luna|cancel\s+luna)\b",
-    re.IGNORECASE,
-)
+def wake_word_pattern_union(phrases: list[str]) -> re.Pattern[str]:
+    """
+    Match any of several wake tokens as whole words (longer tokens first in the alternation).
+    Used so acoustic aliases like "loona" / "lune" actually trigger the same as "luna".
+    """
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for p in phrases:
+        s = (p or "").strip().lower()
+        if s and s not in seen:
+            seen.add(s)
+            cleaned.append(s)
+    if not cleaned:
+        cleaned = ["luna"]
+    cleaned.sort(key=len, reverse=True)
+    inner = "|".join(re.escape(p) for p in cleaned)
+    return re.compile(rf"\b(?:{inner})\b", re.IGNORECASE)
+
+
+def _barge_in_stop_pattern(phrases: list[str]) -> re.Pattern[str]:
+    """Stop/restart phrases while a session is active — supports every wake alias."""
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for p in phrases:
+        s = (p or "").strip().lower()
+        if s and s not in seen:
+            seen.add(s)
+            cleaned.append(s)
+    if not cleaned:
+        cleaned = ["luna"]
+    cleaned.sort(key=len, reverse=True)
+    inner = "|".join(re.escape(p) for p in cleaned)
+    return re.compile(
+        rf"\b(?:{inner})\s+(?:stop|restart|cancel|quit|enough)|stop\s+(?:{inner})|cancel\s+(?:{inner})\b",
+        re.IGNORECASE,
+    )
 
 
 class WakeWordDetector:
     """Feeds 16 kHz mono float32 [-1, 1] blocks into Vosk; reports when the wake phrase is spoken."""
 
-    def __init__(self, *, model_dir: Path, sample_rate: int, phrase: str = "luna") -> None:
+    def __init__(
+        self,
+        *,
+        model_dir: Path,
+        sample_rate: int,
+        phrase: str = "luna",
+        aliases: list[str] | None = None,
+    ) -> None:
         if Model is None or KaldiRecognizer is None:
             print(
                 "Wake word needs the `vosk` package.\n"
@@ -45,7 +82,15 @@ class WakeWordDetector:
         if not path.is_dir():
             print(f"Vosk model directory not found: {path}", file=sys.stderr)
             raise SystemExit(2)
-        self._pat = wake_word_pattern(phrase)
+        tokens: list[str] = [phrase.strip().lower()]
+        if aliases:
+            for a in aliases:
+                s = (a or "").strip().lower()
+                if s and s not in tokens:
+                    tokens.append(s)
+        self._wake_tokens = tokens
+        self._pat = wake_word_pattern_union(tokens)
+        self._stop_pat = _barge_in_stop_pattern(tokens)
         self._rec = KaldiRecognizer(Model(str(path)), sample_rate)
         # Vosk partial hypotheses repeat the same word for many consecutive blocks; only treat
         # a new match as a trigger when the phrase *appears* (rising edge), not every frame.
@@ -77,7 +122,7 @@ class WakeWordDetector:
         else:
             text = self._text_from_json(self._rec.PartialResult())
         matches_wake = bool(text) and bool(self._pat.search(text))
-        matches_stop = bool(text) and bool(_BARGE_IN_STOP_RE.search(text))
+        matches_stop = bool(text) and bool(self._stop_pat.search(text))
         wake_rising = matches_wake and not self._had_phrase_match
         stop_rising = matches_stop and not self._had_stop_match
         self._had_phrase_match = matches_wake

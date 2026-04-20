@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue as _queue
 import re
 import sys
@@ -222,6 +223,7 @@ class LunaVoiceFollowup:
         self._mic_gain = config.clamp_luna_mic_gain(
             float(mic_gain) if mic_gain is not None else float(config.LUNA_MIC_GAIN)
         )
+        self._whisper_cpu_threads = max(1, min(8, (os.cpu_count() or 4)))
 
         # Best-effort: warm up Whisper early so first command is faster.
         self._preload_whisper_if_enabled()
@@ -797,7 +799,12 @@ class LunaVoiceFollowup:
         if self._whisper_model is None:
             model_size = str(getattr(config, "LUNA_WHISPER_MODEL", "tiny.en"))
             print(f"[Luna] Loading Whisper model {model_size!r}…", flush=True)
-            self._whisper_model = WhisperModel(model_size, device="cpu", compute_type="int8")
+            self._whisper_model = WhisperModel(
+                model_size,
+                device="cpu",
+                compute_type="int8",
+                cpu_threads=self._whisper_cpu_threads,
+            )
         audio = np.asarray(wave, dtype=np.float32).reshape(-1)
         segments, _ = self._whisper_model.transcribe(audio, language="en", beam_size=1)
         return " ".join(s.text.strip() for s in segments).strip()
@@ -818,7 +825,12 @@ class LunaVoiceFollowup:
             try:
                 model_size = str(getattr(config, "LUNA_WHISPER_MODEL", "tiny.en"))
                 print(f"[Luna] Preloading Whisper model {model_size!r}…", flush=True)
-                self._whisper_model = WhisperModel(model_size, device="cpu", compute_type="int8")
+                self._whisper_model = WhisperModel(
+                    model_size,
+                    device="cpu",
+                    compute_type="int8",
+                    cpu_threads=self._whisper_cpu_threads,
+                )
             except Exception:
                 # Best-effort preload; transcription will retry on first use.
                 return

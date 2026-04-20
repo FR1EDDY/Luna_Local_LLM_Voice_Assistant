@@ -8,6 +8,28 @@ from pathlib import Path
 
 from jarvis.paths import PACKAGE_DIR, PROJECT_ROOT
 
+
+def _env_float(name: str, default: float) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except ValueError:
+        return float(default)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = (os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
 # Audio detection
 SAMPLE_RATE = 16_000
 BLOCK_DURATION_S = 0.02
@@ -64,22 +86,25 @@ WAKE_WORD_ALIASES: list[str] = list(
 # How long after a successful wake trigger before another can fire (prevents double-firing
 # from a single utterance echoing through Vosk's partial → final sequence).
 # Already wired in listener.py; listed here so it follows the same pattern as COOLDOWN_S.
-WAKE_WORD_COOLDOWN_S = 3.0
+WAKE_WORD_COOLDOWN_S = max(0.5, _env_float("JARVIS_WAKE_WORD_COOLDOWN_S", 2.0))
 # LUNA / Vosk wake listener when running ``python3 main.py`` (CLI: ``--no-voice-assistant`` to disable).
 DEFAULT_VOICE_ASSISTANT = True
 
 # After LUNA: multi-turn chat → Vosk transcribe → Ollama (``--ollama-model``) → TTS.
 # Say the wake word again while Luna is active to stop playback and restart (barge-in).
 DEFAULT_LUNA_CHAT = True
-LUNA_POST_WAKE_GAP_S = 1.25
+# Shorter gaps feel snappier; raise if you get echo picking up Luna’s own voice.
+LUNA_POST_WAKE_GAP_S = max(0.1, _env_float("JARVIS_LUNA_POST_WAKE_GAP_S", 0.75))
 # Pause after Luna speaks (Kokoro) before opening the mic again (reduces echo).
-LUNA_POST_TTS_GAP_S = 0.5
+LUNA_POST_TTS_GAP_S = max(0.05, _env_float("JARVIS_LUNA_POST_TTS_GAP_S", 0.35))
 LUNA_CMD_MAX_DURATION_S = 30.0
-LUNA_CMD_END_SILENCE_S = 1.2
+LUNA_CMD_END_SILENCE_S = max(0.4, _env_float("JARVIS_LUNA_CMD_END_SILENCE_S", 1.0))
 # No speech yet, right after the wake chime.
 LUNA_CMD_PRE_SPEECH_TIMEOUT_S = 6.0
 # After at least one exchange: silence this long → session ends; wake word “Luna” works again.
 LUNA_CHAT_FOLLOWUP_PRE_SPEECH_TIMEOUT_S = 10.0
+
+
 def _env_int_bounded(name: str, default: int, lo: int, hi: int) -> int:
     raw = (os.environ.get(name) or "").strip()
     if not raw:
@@ -94,27 +119,6 @@ def _env_int_bounded(name: str, default: int, lo: int, hi: int) -> int:
 
 # RSS headlines in the welcome briefing (Markdown + spoken). Override: JARVIS_BRIEFING_HEADLINE_COUNT.
 BRIEFING_HEADLINE_COUNT = _env_int_bounded("JARVIS_BRIEFING_HEADLINE_COUNT", 8, 1, 25)
-
-
-def _env_float(name: str, default: float) -> float:
-    raw = (os.environ.get(name) or "").strip()
-    if not raw:
-        return float(default)
-    try:
-        return float(raw)
-    except ValueError:
-        return float(default)
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw = (os.environ.get(name) or "").strip().lower()
-    if not raw:
-        return default
-    if raw in ("1", "true", "yes", "on"):
-        return True
-    if raw in ("0", "false", "no", "off"):
-        return False
-    return default
 
 
 def clamp_luna_mic_gain(raw: float) -> float:
@@ -290,8 +294,8 @@ CURSOR_DICTATION_KEYCODE = _env_positive_int("JARVIS_DICTATION_KEYCODE")
 CURSOR_DICTATION_TAPS = _env_positive_int("JARVIS_DICTATION_TAPS")
 
 # Whisper transcription backend (optional, requires: pip install faster-whisper).
-# "tiny.en" is fast on Apple Silicon; "base.en" is more accurate.
-LUNA_WHISPER_MODEL = (os.environ.get("JARVIS_LUNA_WHISPER_MODEL") or "base.en").strip()
+# Default ``tiny.en`` prioritizes latency; use ``base.en`` for harder transcripts.
+LUNA_WHISPER_MODEL = (os.environ.get("JARVIS_LUNA_WHISPER_MODEL") or "tiny.en").strip()
 
 # If true, load the Whisper model early (in the background) so the first Luna command
 # doesn’t pay the full model initialization cost.

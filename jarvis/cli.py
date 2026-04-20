@@ -415,7 +415,12 @@ def main() -> None:
             model_dir=config.VOSK_MODEL_DIR,
             sample_rate=config.SAMPLE_RATE,
             phrase=config.WAKE_WORD_PHRASE,
+            aliases=config.WAKE_WORD_ALIASES,
         )
+        _wake_tokens = sorted(
+            {config.WAKE_WORD_PHRASE.strip().lower(), *[x.strip().lower() for x in config.WAKE_WORD_ALIASES if x.strip()]}
+        )
+        print(f"[Voice] Wake tokens (Vosk): {', '.join(_wake_tokens)}", flush=True)
         greeting_fn: functools.partial | None = None
         fixed = args.luna_response_wav
         if fixed is not None:
