@@ -47,6 +47,23 @@ LUNA_RESPONSE_EXTRA_FALLBACK_WAVS: tuple[Path, ...] = (
     LUNA_RESPONSE_AUDIO_DIR / LUNA_WAKE_AUDIO_SUBDIR / "Yes_what_can_I_do.wav",
 )
 WAKE_WORD_PHRASE = "luna"
+# Acoustic aliases matched with the same whole-word pattern as WAKE_WORD_PHRASE.
+# Each fires the wake trigger identically to the primary phrase.
+#   "loona" — Vosk frequently collapses the /ju/ vowel in "luna" → /uː/, transcribing "loona".
+#   "lune"  — Vosk drops the final /ə/ when speech is fast or mic gain is low.
+#   "lunar" — Vosk appends /r/ (rhotic intrusion); the original pattern blocks it, but it's
+#              a valid mishear worth accepting. NOTE: will also fire on the word "lunar" alone
+#              in any context, which is an intentional tradeoff.
+# Override at runtime: JARVIS_WAKE_WORD_ALIASES=luna,loona,lune,lunar (comma-separated).
+# "luna" is always matched regardless; listing it here has no effect (dedup is automatic).
+WAKE_WORD_ALIASES: list[str] = list(
+    {s.strip().lower() for s in
+     (os.environ.get("JARVIS_WAKE_WORD_ALIASES") or "luna,loona,lune,lunar").split(",")
+     if s.strip()}
+)
+# How long after a successful wake trigger before another can fire (prevents double-firing
+# from a single utterance echoing through Vosk's partial → final sequence).
+# Already wired in listener.py; listed here so it follows the same pattern as COOLDOWN_S.
 WAKE_WORD_COOLDOWN_S = 3.0
 # LUNA / Vosk wake listener when running ``python3 main.py`` (CLI: ``--no-voice-assistant`` to disable).
 DEFAULT_VOICE_ASSISTANT = True
@@ -221,7 +238,7 @@ DEFAULT_TRACK_URI = "spotify:track:39shmbIHICJ2Wxnk1fPSdz"
 DEFAULT_PLAYLIST_URI = (
     'spotify:playlist:3jzszJ1ix9swNf9KmDgZfI?si=d28ca6ac39174eba' # for jarvis playlist
 )
-# Text-to-speech: "kokoro" (local, default) or "openai" (cloud). Override with --tts-backend or JARVIS_TTS_BACKEND.
+# Text-to-speech: Kokoro only (local). OpenAI TTS removed.
 DEFAULT_TTS_BACKEND = "kokoro"
 
 # Optional LLM rewrite for the spoken briefing. Override with --llm-backend or JARVIS_LLM_BACKEND.
@@ -273,10 +290,21 @@ CURSOR_DICTATION_TAPS = _env_positive_int("JARVIS_DICTATION_TAPS")
 # "tiny.en" is fast on Apple Silicon; "base.en" is more accurate.
 LUNA_WHISPER_MODEL = (os.environ.get("JARVIS_LUNA_WHISPER_MODEL") or "base.en").strip()
 
+# If true, load the Whisper model early (in the background) so the first Luna command
+# doesn’t pay the full model initialization cost.
+LUNA_WHISPER_PRELOAD = _env_bool("JARVIS_LUNA_WHISPER_PRELOAD", True)
+
 # Kokoro TTS playback speed for Luna dialogue.
 # 1.0 = normal; 1.1 = slightly snappier for short replies; 0.95 = slower for long DEEP answers.
 # "auto" detects based on reply word count.
 LUNA_TTS_SPEED = (os.environ.get("JARVIS_LUNA_TTS_SPEED") or "auto").strip().lower()
+
+
+# Directory where Luna writes generated markdown files (plans, notes).
+# Override: JARVIS_MARKDOWN_OUTPUT_DIR=~/Documents/notes
+MARKDOWN_OUTPUT_DIR: Path = Path(
+    os.environ.get("JARVIS_MARKDOWN_OUTPUT_DIR") or (Path.home() / "Luna" / "notes")
+).expanduser()
 
 
 def validate_config() -> None:

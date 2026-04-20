@@ -31,13 +31,10 @@ from jarvis.services.tts import speak_weather
 _MEMORY_PATH = Path.home() / ".jarvis_memory.json"
 _MEMORY_MAX_TURNS = 20
 
-_SEARCH_CUES = frozenset({
-    "today", "tonight", "yesterday", "latest", "recent", "news",
-    "current", "right now", "just announced", "score", "who won",
-    "weather in", "temperature in", "happening", "who is", "what is",
-    "how much", "when did", "when was", "price of", "stock", "released",
-    "announced", "update", "version",
-})
+_EXPLICIT_WEB_SEARCH_RE = re.compile(
+    r"^\s*(?:web\s+)?(?:search|look\s+up|google|browse)\s+(?:for\s+)?(.+?)\s*$",
+    re.IGNORECASE,
+)
 
 _PLAN_RE = re.compile(
     r"\b(?:create|make|write|generate|build|draft)\s+(?:a\s+)?(?:detailed\s+)?(?:plan|roadmap|outline|checklist|guide|blueprint)\s+(?:for|to|about|on|called|named)\s+(.+)",
@@ -205,6 +202,8 @@ class LunaVoiceFollowup:
         self._session_generation = 0
         # (title, date_token, start_time_token, end_time_token)
         self._pending_calendar_add: tuple[str | None, str | None, str | None, str | None] | None = None
+        # Topic name waiting for overwrite confirmation (set when plan file already exists)
+        self._pending_plan_overwrite: str | None = None
         self._text_session: bool = False
         self._news_context: list[str] = []
         self._voice_rms_thr = (
@@ -215,6 +214,9 @@ class LunaVoiceFollowup:
         self._mic_gain = config.clamp_luna_mic_gain(
             float(mic_gain) if mic_gain is not None else float(config.LUNA_MIC_GAIN)
         )
+
+        # Best-effort: warm up Whisper early so first command is faster.
+        self._preload_whisper_if_enabled()
 
     # Perceptual curve so the 0–100 slider feels "linear in loudness".
     # Raw amplitude gain is linear, but human hearing is roughly logarithmic — without a
@@ -337,6 +339,7 @@ class LunaVoiceFollowup:
             self._history = self._load_long_term_memory()
             self._completed_turns = 0
             self._pending_calendar_add = None
+            self._pending_plan_overwrite = None
             self._phase = "gap"
             self._gap_until = now + float(config.LUNA_POST_WAKE_GAP_S)
         mac_audio.stop_spoken_output_macos()
@@ -352,6 +355,7 @@ class LunaVoiceFollowup:
             self._history.clear()
             self._completed_turns = 0
             self._pending_calendar_add = None
+            self._pending_plan_overwrite = None
             self._phase = "idle"
         self._set_ui_state("idle")
         self._invoke_idle_reset()
@@ -445,6 +449,7 @@ class LunaVoiceFollowup:
             self._history.clear()
             self._completed_turns = 0
             self._pending_calendar_add = None
+            self._pending_plan_overwrite = None
         self._set_ui_state("idle")
         print("[Luna] (no speech after the chime — session ended)", flush=True)
         self._invoke_idle_reset()
@@ -457,6 +462,7 @@ class LunaVoiceFollowup:
             self._history.clear()
             self._completed_turns = 0
             self._pending_calendar_add = None
+            self._pending_plan_overwrite = None
         self._set_ui_state("idle")
         print("[Luna] (no reply — session ended)", flush=True)
         if history_snapshot:
@@ -472,6 +478,7 @@ class LunaVoiceFollowup:
             self._history.clear()
             self._completed_turns = 0
             self._pending_calendar_add = None
+            self._pending_plan_overwrite = None
         self._set_ui_state("idle")
         print("[Luna] Mic released for macOS dictation (double-clap + wake word when finished).", flush=True)
         if history_snapshot:
@@ -530,20 +537,45 @@ class LunaVoiceFollowup:
             print(f"[Luna] Could not save memory: {e}", file=sys.stderr, flush=True)
 
     # ------------------------------------------------------------------ plans
-    def _generate_and_save_plan(self, topic: str, my_gen: int) -> str:
-        """Generate a markdown plan via Ollama, save to disk, push to UI."""
-        from jarvis.services.plans import save_plan
-        plan_system = (
-            "You are a professional project planner. The user wants a detailed markdown plan. "
-            "Output ONLY the markdown document — no preamble, no explanation outside it. "
-            "Use clear heading levels (# ## ###), bullet lists, and checkboxes (- [ ]). "
-            "Be thorough: include phases, steps, resources, and success criteria."
+    def _generate_and_save_plan(
+        self, topic: str, my_gen: int, *, overwrite: bool = False, version: bool = False
+    ) -> str:
+        """
+        Generate a structured markdown plan via Ollama, format it, save to MARKDOWN_OUTPUT_DIR,
+        and speak the filename aloud.
+        Pass overwrite=True to replace an existing file, version=True to save a new version.
+        """
+        from datetime import date as _date
+        from jarvis.services.plans import (
+            build_plan_content, plan_path, save_plan_to, versioned_plan_path,
         )
-        plan_prompt = f"Create a comprehensive markdown plan for: {topic}"
+
+        date_str = _date.today().isoformat()
+
+        plan_system = (
+            "You are a professional project planner. Output ONLY the markdown document — "
+            "no preamble, no explanation outside it. Use this EXACT template structure:\n\n"
+            "# {TITLE}\n"
+            "> One-line description of what this project achieves.\n\n"
+            "## Goal\n"
+            "A clear 1-2 sentence project goal.\n\n"
+            "## Tasks\n"
+            "- [ ] Specific actionable task (priority: high)\n"
+            "- [ ] Specific actionable task (priority: medium)\n"
+            "- [ ] Specific actionable task (priority: low)\n\n"
+            "## Notes\n"
+            "Important assumptions, constraints, or context.\n\n"
+            "## Resources\n"
+            "- Relevant resource or reference\n\n"
+            "Rules: use ONLY # ## ### headings; each task must include (priority: high/medium/low); "
+            "include 5-10 realistic tasks; no extra sections beyond Goal/Tasks/Notes/Resources."
+        )
+        plan_prompt = f"Create a project plan for: {topic}"
+
         print(f"[Luna] Generating plan for: {topic!r}", flush=True)
         try:
             from jarvis.services.llm_ollama import ollama_generate
-            content = ollama_generate(
+            raw_content = ollama_generate(
                 host=self._ollama_host,
                 model=self._ollama_model,
                 system=plan_system,
@@ -555,23 +587,54 @@ class LunaVoiceFollowup:
             print(f"[Luna] Plan generation failed: {ex}", file=sys.stderr, flush=True)
             self._speak("Sorry, I couldn't generate that plan.")
             return ""
-        if not content or my_gen != self._session_generation:
+        if not raw_content or my_gen != self._session_generation:
             return ""
-        saved_path = save_plan(topic, content)
+
+        # Apply canonical formatting: metadata frontmatter + TOC + template enforcement
+        formatted = build_plan_content(topic, raw_content, date_str=date_str)
+
+        # Determine save path
+        if version:
+            save_path = versioned_plan_path(topic)
+        else:
+            save_path = plan_path(topic)
+
+        saved_path = save_plan_to(save_path, formatted)
         print(f"[Luna] Plan saved: {saved_path}", flush=True)
+
         if self._ui_plan_callback:
             try:
-                self._ui_plan_callback(topic, content)
+                self._ui_plan_callback(topic, formatted)
             except Exception:
                 pass
-        spoken = f"I've created a plan for {topic} and saved it. You can view and edit it in the plans panel."
+
+        filename = saved_path.name
+        spoken = (
+            f"Created project plan: {filename}. "
+            f"I've saved it to your notes folder."
+        )
         self._speak(spoken)
         return spoken
 
     # ------------------------------------------------------------------ web search
-    def _should_search(self, text: str) -> bool:
-        lower = text.lower()
-        return any(cue in lower for cue in _SEARCH_CUES)
+    def _explicit_web_search_query(self, text: str) -> str | None:
+        """
+        Only allow web access when the user explicitly asks.
+        Examples:
+        - "search for the latest iPhone"
+        - "web search tesla stock price"
+        - "look up who won the game"
+        """
+        m = _EXPLICIT_WEB_SEARCH_RE.match((text or "").strip())
+        if not m:
+            return None
+        q = (m.group(1) or "").strip().strip("\"'").strip()
+        if not q:
+            return None
+        # Avoid accidental searches on very short queries like "search" / "google".
+        if len(q) < 3:
+            return None
+        return q
 
     def _search_ddg(self, query: str) -> str | None:
         """
@@ -685,6 +748,29 @@ class LunaVoiceFollowup:
         audio = np.asarray(wave, dtype=np.float32).reshape(-1)
         segments, _ = self._whisper_model.transcribe(audio, language="en", beam_size=1)
         return " ".join(s.text.strip() for s in segments).strip()
+
+    def _preload_whisper_if_enabled(self) -> None:
+        if self._transcribe_backend != "whisper":
+            return
+        if not bool(getattr(config, "LUNA_WHISPER_PRELOAD", True)):
+            return
+        if self._whisper_model is not None:
+            return
+
+        def _load() -> None:
+            try:
+                from faster_whisper import WhisperModel  # type: ignore[import]
+            except ImportError:
+                return
+            try:
+                model_size = str(getattr(config, "LUNA_WHISPER_MODEL", "tiny.en"))
+                print(f"[Luna] Preloading Whisper model {model_size!r}…", flush=True)
+                self._whisper_model = WhisperModel(model_size, device="cpu", compute_type="int8")
+            except Exception:
+                # Best-effort preload; transcription will retry on first use.
+                return
+
+        threading.Thread(target=_load, daemon=True).start()
 
     def _transcribe(self, wave: np.ndarray) -> str:
         if self._transcribe_backend == "whisper":
@@ -874,6 +960,7 @@ class LunaVoiceFollowup:
                     self._history.clear()
                     self._completed_turns = 0
                     self._pending_calendar_add = None
+                    self._pending_plan_overwrite = None
                     self._phase = "idle"
                 self._set_ui_state("idle")
                 self._invoke_idle_reset()
@@ -887,11 +974,45 @@ class LunaVoiceFollowup:
                     self._history.clear()
                     self._completed_turns = 0
                     self._pending_calendar_add = None
+                    self._pending_plan_overwrite = None
                     self._phase = "idle"
                 self._set_ui_state("idle")
                 if history_snapshot:
                     self._save_long_term_memory(history_snapshot)
                 self._invoke_idle_reset()
+                return
+
+            # Plan overwrite confirmation: user said yes/overwrite or new version.
+            if self._pending_plan_overwrite is not None:
+                topic = self._pending_plan_overwrite
+                self._pending_plan_overwrite = None
+                normalized = _normalize_utterance(user_text)
+                words = set(normalized.split())
+                overwrite_words = {"yes", "yeah", "yep", "sure", "ok", "okay", "overwrite", "replace", "update"}
+                version_words = {"new", "version", "another"}
+                if words & overwrite_words:
+                    reply = self._generate_and_save_plan(topic, my_gen, overwrite=True)
+                elif (words & version_words) or "new version" in normalized:
+                    reply = self._generate_and_save_plan(topic, my_gen, version=True)
+                else:
+                    reply = "Okay, I'll leave the existing plan as is."
+                    self._speak(reply)
+                    self._begin_followup_listening()
+                    return
+                if my_gen != self._session_generation:
+                    return
+                if reply:
+                    with self._lock:
+                        if my_gen == self._session_generation:
+                            self._history.append((user_text, reply))
+                            self._trim_history()
+                            self._completed_turns += 1
+                    if self._ui_text_callback:
+                        try:
+                            self._ui_text_callback(user_text, reply)
+                        except Exception:
+                            pass
+                self._begin_followup_listening()
                 return
 
             # Slot-filling for calendar adds: accept missing fields over multiple turns.
@@ -1038,6 +1159,18 @@ class LunaVoiceFollowup:
             plan_match = _PLAN_RE.search(user_text)
             if plan_match:
                 topic = plan_match.group(1).strip().rstrip(".")
+                from jarvis.services.plans import plan_path as _plan_path
+                existing = _plan_path(topic)
+                if existing.exists():
+                    # Ask user: overwrite or create a new version?
+                    self._pending_plan_overwrite = topic
+                    fname = existing.name
+                    self._speak(
+                        f"A file called {fname} already exists. "
+                        f"Should I overwrite it or create a new version?"
+                    )
+                    self._begin_followup_listening()
+                    return
                 reply = self._generate_and_save_plan(topic, my_gen)
                 if my_gen != self._session_generation:
                     return
@@ -1057,7 +1190,8 @@ class LunaVoiceFollowup:
                 self._begin_followup_listening()
                 return
 
-            search_ctx = self._search_ddg(user_text) if self._should_search(user_text) else None
+            q = self._explicit_web_search_query(user_text)
+            search_ctx = self._search_ddg(q) if q else None
             if search_ctx:
                 print(f"[Luna] Web search result injected: {search_ctx[:80]}…", flush=True)
 

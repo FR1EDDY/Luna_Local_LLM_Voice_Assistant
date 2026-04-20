@@ -28,13 +28,14 @@ def _build_daily_briefing_md(
     today: date,
     raw_headlines: list[str],
 ) -> str:
-    """Build markdown content for the daily briefing file."""
+    """Build a structured markdown daily briefing with metadata frontmatter."""
+    from jarvis.services.plans import wrap_markdown
+
     lines: list[str] = [
         f"# Daily Briefing — {today.strftime('%A, %B %-d %Y')}",
         "",
     ]
 
-    # Calendar: today + tomorrow (matches spoken briefing when today is empty but tomorrow is not).
     lines.append("## Schedule")
     try:
         lines.extend(daily_briefing_schedule_md_lines(today))
@@ -43,7 +44,6 @@ def _build_daily_briefing_md(
 
     lines.append("")
 
-    # News headlines
     lines.append("## Business & Markets News")
     if raw_headlines:
         for h in raw_headlines:
@@ -58,7 +58,8 @@ def _build_daily_briefing_md(
         lines.append("- No headlines fetched")
 
     lines.append("")
-    return "\n".join(lines)
+    body = "\n".join(lines)
+    return wrap_markdown(body, date_str=today.isoformat())
 
 
 def run_welcome_sequence(
@@ -148,9 +149,6 @@ def run_welcome_sequence(
         delay = max(0.0, min(120.0, float(pre_announcement_delay_s)))
         if delay > 0.0:
             time.sleep(delay)
-
-        open_app("Calendar")
-        open_app("Weather")
 
         speak_weather(
             weather_text,
